@@ -45,7 +45,7 @@ $FileTypeMappings = @{
     '.dts' = 'Audio\Other'; '.amr' = 'Audio\Other'; '.3ga' = 'Audio\Other'
 
     # Archives (all → ZIP folder)
-    '.zip' = 'Archives\ZIP'; '.rar' = 'Archives\ZIP'; '.7z' = 'Archives\ZIP'
+    '.zip' = 'Archives\ZIP'; '.rar' = 'Archives\RAR'; '.7z' = 'Archives\7Z'
     '.tar' = 'Archives\ZIP'; '.gz' = 'Archives\ZIP'; '.bz2' = 'Archives\ZIP'; '.xz' = 'Archives\ZIP'
     '.lz' = 'Archives\ZIP'; '.lzma' = 'Archives\ZIP'; '.cab' = 'Archives\ZIP'
     '.iso' = 'Archives\ZIP'; '.dmg' = 'Archives\ZIP'; '.pkg' = 'Archives\ZIP'
