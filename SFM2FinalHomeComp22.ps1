@@ -5,11 +5,12 @@
 param(
     [string]$DownloadsPath = "Y:\Dwnl",
     [string]$LogFilePath = "$($DownloadsPath)\FileMonitor.log",
-    [int]$ExeLaunchDelay = 5 # Seconds to wait before launching .exe
+    [int]$ExeLaunchDelay = 5, # Seconds to wait before launching .exe
+    [int]$PollInterval = 2 # Seconds between each scan for files
 )
 
 #---------------------------
-# Simple file type mappings
+# File type mappings
 #---------------------------
 $FileTypeMappings = @{
     # Documents
@@ -33,7 +34,7 @@ $FileTypeMappings = @{
     '.raw' = 'Images\Other'; '.cr2' = 'Images\Other'; '.nef' = 'Images\Other'; '.dng' = 'Images\Other'
     '.heic' = 'Images\Other'; '.heif' = 'Images\Other'
 
-    # Videos (all → MP4)
+    # Videos
     '.mp4' = 'Videos\MP4'; '.m4v' = 'Videos\MP4'; '.avi' = 'Videos\MP4'; '.mkv' = 'Videos\MP4'
     '.mov' = 'Videos\MP4'; '.wmv' = 'Videos\MP4'; '.flv' = 'Videos\MP4'; '.webm' = 'Videos\MP4'
     '.3gp' = 'Videos\MP4'; '.ogv' = 'Videos\MP4'; '.m2ts' = 'Videos\MP4'; '.ts' = 'Videos\MP4'
@@ -44,7 +45,7 @@ $FileTypeMappings = @{
     '.wma' = 'Audio\Other'; '.m4a' = 'Audio\Other'; '.opus' = 'Audio\Other'; '.ape' = 'Audio\Other'; '.ac3' = 'Audio\Other'
     '.dts' = 'Audio\Other'; '.amr' = 'Audio\Other'; '.3ga' = 'Audio\Other'
 
-    # Archives (all → ZIP folder)
+    # Archives
     '.zip' = 'Archives\ZIP'; '.rar' = 'Archives\RAR'; '.7z' = 'Archives\7Z'
     '.tar' = 'Archives\ZIP'; '.gz' = 'Archives\ZIP'; '.bz2' = 'Archives\ZIP'; '.xz' = 'Archives\ZIP'
     '.lz' = 'Archives\ZIP'; '.lzma' = 'Archives\ZIP'; '.cab' = 'Archives\ZIP'
@@ -64,7 +65,7 @@ $FileTypeMappings = @{
     '.json' = 'Scripts\Configs'; '.xml' = 'Scripts\Configs'; '.ini' = 'Scripts\Configs'; '.cfg' = 'Scripts\Configs'
     '.yml' = 'Scripts\Configs'; '.yaml' = 'Scripts\Configs'; '.psm1' = 'Scripts\Configs'
 
-    # Miscellaneous / Other
+    # Misc
     '.torrent' = 'Miscellaneous'; '.log' = 'Miscellaneous'; '.md' = 'Miscellaneous'; '.url' = 'Miscellaneous'
     '.desktop' = 'Miscellaneous'; '.lnk' = 'Miscellaneous'; '.tmp' = 'Miscellaneous'; '.part' = 'Miscellaneous'
 }
@@ -73,82 +74,183 @@ $FileTypeMappings = @{
 # Logging function
 #---------------------------
 function Write-Log {
-    param(
-        [string]$Message,
-        [ConsoleColor]$Color = "White"
-    )
+    param([string]$Message, [ConsoleColor]$Color = "White")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "[$timestamp] $Message"
-    Write-Host $logEntry -ForegroundColor $Color
-    Add-Content -Path $LogFilePath -Value $logEntry
+    $entry = "[$timestamp] $Message"
+    Write-Host $entry -ForegroundColor $Color
+    Add-Content -Path $LogFilePath -Value $entry
 }
 
 #---------------------------
-# Move PowerShell console to second monitor
+# Move console to second monitor
 #---------------------------
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Win32 {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr GetForegroundWindow();
-
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
 }
 "@
-
 function Move-ConsoleToSecondMonitor {
     $screens = [System.Windows.Forms.Screen]::AllScreens
     if ($screens.Count -lt 2) {
-        Write-Log -Message "Only one monitor detected - skipping move." -Color Yellow
+        Write-Log "Only one monitor detected - skipping move." Yellow
         return
     }
-
     $second = $screens[1]
-
     Start-Sleep -Milliseconds 500
     $handle = [Win32]::GetForegroundWindow()
-
     if ($handle -ne [IntPtr]::Zero) {
-        $width  = 1200
-        $height = 800
-        $x = $second.Bounds.X + 100
-        $y = $second.Bounds.Y + 100
-        [Win32]::MoveWindow($handle, $x, $y, $width, $height, $true) | Out-Null
-        Write-Log -Message "Moved console to second monitor." -Color Cyan
-    } else {
-        Write-Log -Message "Could not find console window handle." -Color Red
+        [Win32]::MoveWindow($handle, $second.Bounds.X + 100, $second.Bounds.Y + 100, 1200, 800, $true) | Out-Null
+        Write-Log "Moved console to second monitor." Cyan
     }
 }
-
 Move-ConsoleToSecondMonitor
 
 #---------------------------
-# Function to delete temporary files
+# Clear temporary files
 #---------------------------
 function Clear-TemporaryFiles {
-    $tempPath = Join-Path -Path $DownloadsPath -ChildPath "Temporary"
-    if (Test-Path $tempPath) {
-        Write-Log -Message "Clearing temporary files from '$tempPath'" -Color DarkGray
+    $temp = Join-Path $DownloadsPath "Temporary"
+    if (Test-Path $temp) {
+        Write-Log "Clearing temporary files from '$temp'" DarkGray
         try {
-            Get-ChildItem -Path $tempPath -File | ForEach-Object {
-                Remove-Item -Path $_.FullName -Force
-            }
-            Write-Log -Message "Temporary files cleared." -Color Green
+            Get-ChildItem $temp -File | Remove-Item -Force
+            Write-Log "Temporary files cleared." Green
         } catch {
-            Write-Log -Message "Error clearing temporary files: $_" -Color Red
+            Write-Log "Error clearing temporary files: $_" Red
         }
-    } else {
-        Write-Log -Message "Temporary folder not found: '$tempPath'" -Color DarkGray
     }
 }
 
 #---------------------------
-# Setup FileSystemWatcher
+# Wait until file is ready
+#---------------------------
+function Wait-ForFileReady {
+    param([string]$FilePath, [int]$MaxWaitSeconds = 300)
+    $waited = 0
+    while ($waited -lt $MaxWaitSeconds) {
+        try {
+            if ($FilePath -match '\.crdownload$' -or $FilePath -match '\.part$' -or $FilePath -match '\.tmp$') { return $false }
+            $stream = [System.IO.File]::Open($FilePath, 'Open', 'Read', 'None')
+            if ($stream) { $stream.Close(); return $true }
+        } catch {}
+        Start-Sleep -Milliseconds 500
+        $waited += 0.5
+    }
+    return $false
+}
+
+#---------------------------
+# Function: Update existing files
+#---------------------------
+function Update-ExistingFiles {
+    Write-Log "Updating existing files in $DownloadsPath..." Cyan
+    Get-ChildItem -Path $DownloadsPath -File | ForEach-Object {
+        $path  = $_.FullName
+        $name  = $_.Name
+        $ext   = $_.Extension.ToLower()
+        $folder = if ($FileTypeMappings.ContainsKey($ext)) { 
+            $FileTypeMappings[$ext] 
+        } else { 
+            'Miscellaneous\Unknown' 
+        }
+
+        $dest = Join-Path $DownloadsPath $folder
+        if (-not (Test-Path $dest)) { 
+            New-Item -Path $dest -ItemType Directory | Out-Null 
+        }
+
+        try {
+            Move-Item -Path $path -Destination (Join-Path $dest $name) -Force
+            Write-Log "Moved existing file '$name' to '$folder'" Yellow
+        } catch {
+            Write-Log "Failed to move existing file '$name': $_" Red
+        }
+    }
+    Write-Log "Existing files updated." Green
+}
+
+#---------------------------
+# Function: Continuously move files from root download folder
+#---------------------------
+function Move-FilesFromRoot {
+    try {
+        # Get all files in the root of DownloadsPath (not in subdirectories)
+        $files = Get-ChildItem -Path $DownloadsPath -File -ErrorAction SilentlyContinue
+        
+        foreach ($file in $files) {
+            $path = $file.FullName
+            $name = $file.Name
+            $ext = $file.Extension.ToLower()
+            
+            # Skip log file, temporary files, and partial downloads
+            if ($path -eq $LogFilePath) { continue }
+            if ($name -match '\.(crdownload|part|tmp)$') { continue }
+            
+            # Wait for file to be ready (not locked)
+            if (-not (Wait-ForFileReady -FilePath $path)) {
+                Write-Log "File '$name' is still being written or locked, skipping..." DarkGray
+                continue
+            }
+            
+            # Determine destination folder
+            if ($FileTypeMappings.ContainsKey($ext)) {
+                $relativeFolder = $FileTypeMappings[$ext]
+            } else {
+                $relativeFolder = 'Miscellaneous\Unknown'
+            }
+            
+            $destinationFolder = Join-Path -Path $DownloadsPath -ChildPath $relativeFolder
+            if (-not (Test-Path $destinationFolder)) {
+                New-Item -Path $destinationFolder -ItemType Directory -Force | Out-Null
+                Write-Log "Created folder: $relativeFolder" Green
+            }
+            
+            $destinationPath = Join-Path -Path $destinationFolder -ChildPath $name
+            
+            # Check if destination already exists and handle duplicates
+            if (Test-Path $destinationPath) {
+                $baseName = [System.IO.Path]::GetFileNameWithoutExtension($name)
+                $counter = 1
+                do {
+                    $newName = "${baseName}_${counter}$ext"
+                    $destinationPath = Join-Path -Path $destinationFolder -ChildPath $newName
+                    $counter++
+                } while (Test-Path $destinationPath)
+                Write-Log "Duplicate detected, renaming to: $newName" DarkYellow
+            }
+            
+            try {
+                Move-Item -Path $path -Destination $destinationPath -Force -ErrorAction Stop
+                Write-Log "Moved '$name' to '$relativeFolder'" Yellow
+                
+                # Launch .exe files with a delay
+                if ($ext -eq ".exe") {
+                    Start-Sleep -Seconds $ExeLaunchDelay
+                    Write-Log "Launching executable: '$destinationPath'" Green
+                    try {
+                        Start-Process -FilePath $destinationPath
+                    } catch {
+                        Write-Log "Failed to launch '$name': $_" Red
+                    }
+                }
+            } catch {
+                Write-Log "Failed to move '$name': $_" Red
+            }
+        }
+    } catch {
+        Write-Log "Error in Move-FilesFromRoot: $_" Red
+    }
+}
+
+#---------------------------
+# FileSystemWatcher Setup
 #---------------------------
 try {
     if (-not (Test-Path $DownloadsPath)) {
@@ -164,9 +266,13 @@ try {
     $watcher.IncludeSubdirectories = $false
     $watcher.EnableRaisingEvents = $true
 
+    #---------------------------
     # File Created
+    #---------------------------
     Register-ObjectEvent $watcher Created -Action {
         $path = $Event.SourceEventArgs.FullPath
+        if ($path -eq $LogFilePath) { return } # ✅ Ignore log file
+
         $extension = [System.IO.Path]::GetExtension($path).ToLower()
         $fileName = [System.IO.Path]::GetFileName($path)
 
@@ -178,7 +284,6 @@ try {
         }
 
         $destinationFolder = Join-Path -Path $DownloadsPath -ChildPath $relativeFolder
-
         if (-not (Test-Path $destinationFolder)) {
             New-Item -Path $destinationFolder -ItemType Directory | Out-Null
             Write-Log -Message "Created folder: $destinationFolder" -Color Green
@@ -206,37 +311,56 @@ try {
         }
     }
 
+    #---------------------------
     # File Changed
+    #---------------------------
     Register-ObjectEvent $watcher Changed -Action {
         $path = $Event.SourceEventArgs.FullPath
+        if ($path -eq $LogFilePath) { return } # ✅ Ignore log file
         Write-Log -Message "File modified: $path" -Color Blue
     }
 
+    #---------------------------
     # File Deleted
+    #---------------------------
     Register-ObjectEvent $watcher Deleted -Action {
         $path = $Event.SourceEventArgs.FullPath
+        if ($path -eq $LogFilePath) { return } # ✅ Ignore log file
         Write-Log -Message "File deleted: $path" -Color Red
     }
 
+    #---------------------------
     # File Renamed
+    #---------------------------
     Register-ObjectEvent $watcher Renamed -Action {
         $old = $Event.SourceEventArgs.OldFullPath
         $new = $Event.SourceEventArgs.FullPath
+        if ($new -eq $LogFilePath -or $old -eq $LogFilePath) { return } # ✅ Ignore log file
         Write-Log -Message "File renamed: '$old' -> '$new'" -Color Magenta
     }
+
+    #---------------------------
+    # Update existing files at startup
+    #---------------------------
+    Update-ExistingFiles
 
     # Clear temporary files on startup
     Clear-TemporaryFiles
 
-    Write-Log -Message "Monitoring started. Press Ctrl + C to stop." -Color Cyan
-    while ($true) { Start-Sleep -Seconds 1 }
+    Write-Log -Message "Continuous file monitoring started. Press Ctrl + C to stop." -Color Cyan
+    Write-Log -Message "Scanning every $PollInterval seconds..." -Color Green
+    
+    # Continuous polling loop to move files
+    while ($true) {
+        Move-FilesFromRoot
+        Start-Sleep -Seconds $PollInterval
+    }
 
 } finally {
     if ($watcher) { $watcher.Dispose() }
     Get-EventSubscriber | Unregister-Event
     Write-Log -Message "File monitor stopped." -Color Red
 }
-
 #---------------------------
 # End of Script
 #---------------------------
